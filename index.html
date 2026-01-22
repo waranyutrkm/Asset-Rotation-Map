@@ -1,0 +1,1005 @@
+import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { Play, Pause, Plus, Trash2, Activity, TrendingUp, RefreshCw, AlertTriangle, BarChart2, X, Globe, DollarSign, HelpCircle, ZoomIn, ZoomOut, Move, Info, Settings, ShieldCheck } from 'lucide-react';
+
+/**
+ * MATH UTILITIES
+ * Core calculations based on standard Relative Strength and Momentum formulas.
+ */
+
+const calculateWMA = (data, length) => {
+  if (data.length < length) return null;
+  let sum = 0;
+  let weightSum = 0;
+  for (let i = 0; i < length; i++) {
+    const weight = length - i;
+    const val = data[data.length - 1 - i];
+    sum += val * weight;
+    weightSum += weight;
+  }
+  return sum / weightSum;
+};
+
+// Generic RS-Ratio and RS-Momentum calculation logic
+const calculateRotationPoint = (assetHistory, benchmarkHistory, index, length) => {
+  const requiredHistory = length * 2 + 1; 
+  if (index < requiredHistory) return null;
+
+  const slicedAsset = assetHistory.slice(0, index + 1);
+  const slicedBench = benchmarkHistory.slice(0, index + 1);
+
+  const lookback = length * 2 + 5;
+  const startIdx = Math.max(0, index - lookback);
+  
+  const rsArray = [];
+  for (let i = startIdx; i <= index; i++) {
+    const pA = slicedAsset[i];
+    const pB = slicedBench[i];
+    if (!pB || pB === 0) {
+        rsArray.push(1); 
+    } else {
+        rsArray.push(pA / pB);
+    }
+  }
+
+  const rsRatioSeries = [];
+  for (let i = length; i < rsArray.length; i++) {
+    const subset = rsArray.slice(i - length + 1, i + 1);
+    const wma_rs = calculateWMA(subset, length);
+    const currentRS = rsArray[i];
+    
+    if (wma_rs) {
+       rsRatioSeries.push(100 * (currentRS / wma_rs));
+    } else {
+       rsRatioSeries.push(100);
+    }
+  }
+
+  if (rsRatioSeries.length < length) return null;
+
+  const currentRatio = rsRatioSeries[rsRatioSeries.length - 1];
+  const ratioSubset = rsRatioSeries.slice(rsRatioSeries.length - length, rsRatioSeries.length);
+  const wma_ratio = calculateWMA(ratioSubset, length);
+  
+  if (!wma_ratio) return null;
+
+  const currentMom = 100 * (currentRatio / wma_ratio);
+
+  return {
+    ratio: currentRatio,
+    momentum: currentMom,
+    price: slicedAsset[slicedAsset.length - 1]
+  };
+};
+
+/**
+ * STATISTICAL ANALYSIS ENGINE
+ */
+const analyzeAssetStatistics = (assetSymbol, assetHistory, benchmarkHistory, length) => {
+  const getQuadrant = (r, m) => {
+    if (r >= 100 && m >= 100) return 'Leading';
+    if (r >= 100 && m < 100) return 'Weakening';
+    if (r < 100 && m < 100) return 'Lagging';
+    if (r < 100 && m >= 100) return 'Improving';
+    return 'Unknown';
+  };
+
+  const stats = {
+    Leading: { count: 0, days: 0, totalReturn: 0, totalMaxDD: 0, wins: 0, entries: 0 },
+    Weakening: { count: 0, days: 0, totalReturn: 0, totalMaxDD: 0, wins: 0, entries: 0 },
+    Lagging: { count: 0, days: 0, totalReturn: 0, totalMaxDD: 0, wins: 0, entries: 0 },
+    Improving: { count: 0, days: 0, totalReturn: 0, totalMaxDD: 0, wins: 0, entries: 0 },
+    TotalDaysAnalyzed: 0
+  };
+
+  let currentQuad = null;
+  let entryPrice = 0;
+  let peakPriceInQuad = 0;
+  let maxDDInQuad = 0;
+  let daysInQuad = 0;
+
+  const startIdx = length * 2 + 5;
+  
+  for (let i = startIdx; i < assetHistory.length; i++) {
+     const point = calculateRotationPoint(assetHistory, benchmarkHistory, i, length);
+     if (!point) continue;
+
+     const quad = getQuadrant(point.ratio, point.momentum);
+     const price = point.price;
+
+     if (quad !== currentQuad) {
+        if (currentQuad && stats[currentQuad]) {
+            const ret = ((price - entryPrice) / entryPrice) * 100;
+            stats[currentQuad].totalReturn += ret;
+            stats[currentQuad].days += daysInQuad;
+            stats[currentQuad].totalMaxDD += maxDDInQuad;
+            if (ret > 0) stats[currentQuad].wins++;
+        }
+
+        currentQuad = quad;
+        entryPrice = price;
+        peakPriceInQuad = price;
+        maxDDInQuad = 0;
+        daysInQuad = 1;
+        if (stats[quad]) stats[quad].entries++;
+     } else {
+        daysInQuad++;
+        if (price > peakPriceInQuad) {
+            peakPriceInQuad = price;
+        }
+        const currentDD = ((price - peakPriceInQuad) / peakPriceInQuad) * 100;
+        if (currentDD < maxDDInQuad) {
+            maxDDInQuad = currentDD;
+        }
+     }
+     stats.TotalDaysAnalyzed++;
+  }
+
+  if (currentQuad && stats[currentQuad]) {
+     const lastPrice = assetHistory[assetHistory.length - 1];
+     const ret = ((lastPrice - entryPrice) / entryPrice) * 100;
+     stats[currentQuad].totalReturn += ret;
+     stats[currentQuad].days += daysInQuad;
+     stats[currentQuad].totalMaxDD += maxDDInQuad;
+     if (ret > 0) stats[currentQuad].wins++;
+  }
+
+  return stats;
+};
+
+/**
+ * COMPONENT: HELP / METHODOLOGY MODAL (THAI)
+ * Includes Legal Disclaimer
+ */
+const HelpModal = ({ isOpen, onClose }) => {
+  if (!isOpen) return null;
+
+  return (
+    <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/90 backdrop-blur-md p-4 animate-in fade-in duration-200">
+        <div className="bg-slate-950 border border-slate-700 rounded-2xl w-full max-w-4xl max-h-[90vh] overflow-y-auto shadow-2xl relative">
+            <button onClick={onClose} className="absolute top-4 right-4 p-2 bg-slate-800 hover:bg-slate-700 rounded-full transition-colors text-white"><X size={20}/></button>
+            
+            <div className="p-8">
+                <h2 className="text-2xl font-bold text-white mb-6 flex items-center gap-3">
+                    <div className="bg-blue-600 p-2 rounded-lg"><Info size={24} /></div>
+                    หลักการทำงานของ Market Cycle Map
+                </h2>
+
+                <div className="space-y-8">
+                    {/* Step 1 */}
+                    <div className="bg-slate-900/50 p-6 rounded-xl border border-slate-800">
+                        <h3 className="text-lg font-bold text-blue-400 mb-4 flex items-center gap-2">
+                            <span className="bg-blue-500/20 w-8 h-8 rounded-full flex items-center justify-center text-sm border border-blue-500/50">1</span>
+                            Relative Strength (RS) - ความแข็งแกร่งสัมพัทธ์
+                        </h3>
+                        <p className="text-slate-300 mb-4 text-sm leading-relaxed">
+                            ขั้นตอนแรก เราวัดความแข็งแกร่งของสินทรัพย์เทียบกับตัวอ้างอิง (Benchmark)
+                        </p>
+                        <div className="bg-black/50 p-4 rounded-lg font-mono text-xs text-green-400 mb-2 overflow-x-auto">
+                            RS = ราคา(Asset) / ราคา(Benchmark)
+                        </div>
+                    </div>
+
+                    {/* Step 2 */}
+                    <div className="bg-slate-900/50 p-6 rounded-xl border border-slate-800">
+                        <h3 className="text-lg font-bold text-yellow-400 mb-4 flex items-center gap-2">
+                            <span className="bg-yellow-500/20 w-8 h-8 rounded-full flex items-center justify-center text-sm border border-yellow-500/50">2</span>
+                            Trend Component (แนวโน้ม) &rarr; แกน X
+                        </h3>
+                        <p className="text-slate-300 mb-4 text-sm leading-relaxed">
+                            เรานำค่า RS มาปรับฐาน (Normalize) เพื่อดูแนวโน้ม โดยเทียบค่า RS ปัจจุบันกับค่าเฉลี่ยของตัวมันเอง
+                        </p>
+                        <div className="bg-black/50 p-4 rounded-lg font-mono text-xs text-green-400 mb-2 overflow-x-auto">
+                            Ratio = 100 * (RS / MovingAverage(RS, n))
+                        </div>
+                    </div>
+
+                    {/* Step 3 */}
+                    <div className="bg-slate-900/50 p-6 rounded-xl border border-slate-800">
+                        <h3 className="text-lg font-bold text-red-400 mb-4 flex items-center gap-2">
+                            <span className="bg-red-500/20 w-8 h-8 rounded-full flex items-center justify-center text-sm border border-red-500/50">3</span>
+                            Momentum Component (แรงส่ง) &rarr; แกน Y
+                        </h3>
+                        <p className="text-slate-300 mb-4 text-sm leading-relaxed">
+                            วัดอัตราการเปลี่ยนแปลงของ Ratio ว่ามันกำลังพุ่งขึ้นหรือแผ่วลง
+                        </p>
+                        <div className="bg-black/50 p-4 rounded-lg font-mono text-xs text-green-400 mb-2 overflow-x-auto">
+                            Momentum = 100 * (Ratio / MovingAverage(Ratio, n))
+                        </div>
+                    </div>
+
+                    {/* Disclaimer Section */}
+                    <div className="mt-8 p-4 bg-slate-900/80 border border-slate-700 rounded-lg">
+                        <h4 className="text-slate-300 font-bold mb-2 flex items-center gap-2"><ShieldCheck size={16} className="text-green-500"/> ข้อปฏิเสธความรับผิดชอบ (Disclaimer)</h4>
+                        <p className="text-xs text-slate-500 leading-relaxed">
+                            โปรเจกต์นี้ ("Asset Rotation Map") เป็นการนำเสนอข้อมูลเชิงการศึกษาเพื่อวิเคราะห์ "ความแข็งแกร่งสัมพัทธ์ (Relative Strength)" และ "โมเมนตัม (Momentum)" ตามหลักการคณิตศาสตร์สากล โค้ดและการคำนวณทั้งหมดถูกเขียนขึ้นใหม่จากพื้นฐาน (First Principles) เพื่อการวิจัยเท่านั้น
+                            <br/><br/>
+                            ข้อมูลราคาหลักทรัพย์ (Stocks/ETFs) ดึงมาจาก Yahoo Finance ผ่าน Proxy สาธารณะ และข้อมูล Crypto ดึงมาจาก Binance API โดยตรง ความถูกต้องของข้อมูลขึ้นอยู่กับผู้ให้บริการต้นทาง
+                        </p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+  );
+};
+
+/**
+ * COMPONENT: STATS MODAL
+ */
+const StatsModal = ({ isOpen, onClose, stats, symbol, benchmark }) => {
+  if (!isOpen || !stats) return null;
+
+  const StatCard = ({ title, data, colorClass, bgClass }) => {
+     const avgDays = data.entries > 0 ? (data.days / data.entries).toFixed(1) : 0;
+     const avgReturn = data.entries > 0 ? (data.totalReturn / data.entries).toFixed(2) : 0;
+     const avgMaxDD = data.entries > 0 ? (data.totalMaxDD / data.entries).toFixed(2) : 0;
+     const winRate = data.entries > 0 ? ((data.wins / data.entries) * 100).toFixed(0) : 0;
+     
+     return (
+        <div className={`p-4 rounded-xl border ${colorClass} bg-slate-900/90 relative overflow-hidden`}>
+            <div className={`absolute top-0 right-0 w-24 h-24 ${bgClass} opacity-10 rounded-full blur-2xl -mr-10 -mt-10 pointer-events-none`}></div>
+            <h3 className="font-bold text-sm uppercase mb-4 flex justify-between items-center relative z-10">
+                {title}
+                <span className="text-[10px] font-mono opacity-70 bg-white/5 px-2 py-1 rounded border border-white/5">{data.entries} Occurrences</span>
+            </h3>
+            <div className="grid grid-cols-2 gap-y-4 gap-x-6 relative z-10">
+                <div>
+                    <div className="text-[10px] uppercase tracking-wider text-slate-500 mb-0.5">Avg Duration</div>
+                    <div className="text-xl font-mono font-medium text-slate-200">{avgDays} <span className="text-xs text-slate-500">days</span></div>
+                </div>
+                <div>
+                    <div className="text-[10px] uppercase tracking-wider text-slate-500 mb-0.5">Avg Return</div>
+                    <div className={`text-xl font-mono font-medium ${Number(avgReturn) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                        {Number(avgReturn) > 0 ? '+' : ''}{avgReturn}%
+                    </div>
+                </div>
+                <div>
+                    <div className="text-[10px] uppercase tracking-wider text-slate-500 mb-0.5">Avg Max DD</div>
+                    <div className="text-xl font-mono font-medium text-red-400">{avgMaxDD}%</div>
+                </div>
+                <div>
+                    <div className="text-[10px] uppercase tracking-wider text-slate-500 mb-0.5">Win Rate</div>
+                    <div className="text-xl font-mono font-medium text-blue-400">{winRate}%</div>
+                </div>
+            </div>
+            <div className="mt-4 pt-4 border-t border-white/5 relative z-10">
+                 <div className="w-full h-1.5 bg-slate-800 rounded-full overflow-hidden flex">
+                    <div className="h-full bg-blue-500" style={{ width: `${winRate}%` }}></div>
+                 </div>
+            </div>
+        </div>
+     );
+  };
+
+  return (
+    <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-md p-4 animate-in fade-in duration-200">
+        <div className="bg-slate-950 border border-slate-800 rounded-2xl w-full max-w-5xl max-h-[90vh] overflow-y-auto shadow-2xl">
+            <div className="p-6 border-b border-slate-800 flex justify-between items-center sticky top-0 bg-slate-950/95 backdrop-blur z-20">
+                <div>
+                    <h2 className="text-xl font-bold text-white flex items-center gap-2">
+                        <BarChart2 className="text-yellow-500" size={24}/> 
+                        <span>สถิติเชิงลึก (Statistical Analysis)</span>
+                    </h2>
+                    <p className="text-sm text-slate-400 mt-1">
+                        ผลการดำเนินงานของ <span className="text-blue-400 font-bold font-mono">{symbol}</span> เทียบกับ <span className="text-yellow-500 font-bold font-mono">{benchmark}</span>
+                    </p>
+                </div>
+                <button onClick={onClose} className="p-2 hover:bg-slate-800 rounded-full transition-colors text-slate-400 hover:text-white"><X size={24}/></button>
+            </div>
+            <div className="p-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+                <StatCard title="Leading (ผู้นำ)" data={stats.Leading} colorClass="border-green-500/20" bgClass="bg-green-500" />
+                <StatCard title="Weakening (พักตัว)" data={stats.Weakening} colorClass="border-yellow-500/20" bgClass="bg-yellow-500" />
+                <StatCard title="Lagging (ล้าหลัง)" data={stats.Lagging} colorClass="border-slate-500/20" bgClass="bg-slate-500" />
+                <StatCard title="Improving (ฟื้นตัว)" data={stats.Improving} colorClass="border-red-500/20" bgClass="bg-red-500" />
+            </div>
+        </div>
+    </div>
+  );
+};
+
+/**
+ * COMPONENT: ROTATION CHART (Refactored Name)
+ */
+const RotationChart = ({ data, historyTrail }) => {
+  const containerRef = useRef(null);
+  const size = 600;
+  
+  // Zoom & Pan State
+  const [zoom, setZoom] = useState(1);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const [isDragging, setIsDragging] = useState(false);
+  const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
+
+  // Reset zoom logic
+  const resetView = () => {
+    setZoom(1);
+    setPan({ x: 0, y: 0 });
+  };
+
+  const handleWheel = (e) => {
+    e.preventDefault();
+    const zoomSensitivity = 0.001;
+    const newZoom = Math.min(Math.max(0.5, zoom - e.deltaY * zoomSensitivity), 5); // Limit zoom 0.5x to 5x
+    setZoom(newZoom);
+  };
+
+  const handleMouseDown = (e) => {
+    setIsDragging(true);
+    setDragStart({ x: e.clientX, y: e.clientY });
+  };
+
+  const handleMouseMove = (e) => {
+    if (!isDragging) return;
+    const dx = e.clientX - dragStart.x;
+    const dy = e.clientY - dragStart.y;
+    setPan(prev => ({ x: prev.x - dx / zoom, y: prev.y - dy / zoom })); // Invert pan to feel natural
+    setDragStart({ x: e.clientX, y: e.clientY });
+  };
+
+  const handleMouseUp = () => {
+    setIsDragging(false);
+  };
+
+  // Coordinates Mapping
+  const scaleUnit = 20; 
+  const centerX = 300;
+  const centerY = 300;
+
+  const toSvgX = (val) => centerX + (val - 100) * scaleUnit;
+  const toSvgY = (val) => centerY - (val - 100) * scaleUnit;
+
+  const vbWidth = size / zoom;
+  const vbHeight = size / zoom;
+  const vbX = (pan.x) + (size - vbWidth) / 2;
+  const vbY = (pan.y) + (size - vbHeight) / 2;
+
+  return (
+    <div className="w-full h-full relative bg-slate-900 rounded-xl overflow-hidden shadow-inner border border-slate-800 group">
+      {/* Controls Overlay */}
+      <div className="absolute top-4 right-4 z-20 flex flex-col gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+        <button onClick={() => setZoom(z => Math.min(z + 0.5, 5))} className="p-2 bg-slate-800 text-slate-300 rounded hover:bg-slate-700 shadow-lg"><ZoomIn size={16}/></button>
+        <button onClick={() => setZoom(z => Math.max(z - 0.5, 0.5))} className="p-2 bg-slate-800 text-slate-300 rounded hover:bg-slate-700 shadow-lg"><ZoomOut size={16}/></button>
+        <button onClick={resetView} className="p-2 bg-slate-800 text-slate-300 rounded hover:bg-slate-700 shadow-lg" title="Reset View"><RefreshCw size={16}/></button>
+        <div className="bg-slate-900/80 p-1 text-[10px] text-slate-500 rounded text-center backdrop-blur">
+             Zoom: {zoom.toFixed(1)}x
+        </div>
+      </div>
+      
+      {/* Pan Indicator */}
+      {isDragging && <div className="absolute inset-0 z-30 cursor-grabbing bg-transparent"></div>}
+      
+      <div className="absolute inset-0 grid grid-cols-2 grid-rows-2 opacity-5 pointer-events-none">
+        <div className="bg-red-500 border-r border-b border-white/20 flex p-4">
+            <span className="text-red-400 font-black text-3xl opacity-20 uppercase tracking-widest">Improving</span>
+        </div>
+        <div className="bg-green-500 border-b border-white/20 flex justify-end p-4">
+            <span className="text-green-400 font-black text-3xl opacity-20 uppercase tracking-widest">Leading</span>
+        </div>
+        <div className="bg-slate-500 border-r border-white/20 flex items-end p-4">
+            <span className="text-slate-400 font-black text-3xl opacity-20 uppercase tracking-widest">Lagging</span>
+        </div>
+        <div className="bg-yellow-500 flex items-end justify-end p-4">
+            <span className="text-yellow-400 font-black text-3xl opacity-20 uppercase tracking-widest">Weakening</span>
+        </div>
+      </div>
+
+      <div className="absolute top-1/2 left-0 w-full h-[1px] bg-slate-600/40 pointer-events-none"></div>
+      <div className="absolute left-1/2 top-0 h-full w-[1px] bg-slate-600/40 pointer-events-none"></div>
+
+      <svg 
+        ref={containerRef}
+        viewBox={`${vbX} ${vbY} ${vbWidth} ${vbHeight}`} 
+        className={`absolute inset-0 w-full h-full ${isDragging ? 'cursor-grabbing' : 'cursor-grab'}`}
+        onWheel={handleWheel}
+        onMouseDown={handleMouseDown}
+        onMouseMove={handleMouseMove}
+        onMouseUp={handleMouseUp}
+        onMouseLeave={handleMouseUp}
+      >
+        {data.map((asset) => {
+           const trail = historyTrail[asset.symbol] || [];
+           if (trail.length < 2) return null;
+           const points = trail.map(t => `${toSvgX(t.ratio)},${toSvgY(t.momentum)}`).join(' ');
+           return (
+             <g key={`trail-${asset.symbol}`}>
+                <polyline 
+                    points={points}
+                    fill="none"
+                    stroke={asset.color}
+                    strokeWidth={2.5 / zoom}
+                    strokeOpacity="0.5"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                />
+             </g>
+           );
+        })}
+
+        {data.map((asset) => {
+            const x = toSvgX(asset.ratio);
+            const y = toSvgY(asset.momentum);
+            const isSimulated = asset.type === 'stock';
+            const labelScale = 1 / zoom;
+
+            return (
+                <g key={asset.symbol} className="transition-all duration-300 ease-out">
+                    <circle cx={x} cy={y} r={12 * labelScale} fill={asset.color} fillOpacity="0.1" className="animate-pulse" />
+                    <circle cx={x} cy={y} r={5 * labelScale} fill={asset.color} stroke="white" strokeWidth={2 * labelScale} />
+                    <g transform={`translate(${x + (12 * labelScale)}, ${y + (5 * labelScale)}) scale(${labelScale})`}>
+                        <rect x="-6" y="-14" width="54" height="18" rx="4" fill="rgba(15, 23, 42, 0.9)" stroke={asset.color} strokeWidth="1" />
+                        <text x="21" y="-2" textAnchor="middle" fill="white" fontSize="9" fontWeight="700" className="pointer-events-none select-none">
+                            {asset.symbol}
+                        </text>
+                    </g>
+                </g>
+            );
+        })}
+      </svg>
+      
+      <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 text-[10px] text-slate-600 font-mono pointer-events-none text-center z-10">
+         <div className="bg-slate-950/90 px-3 py-1 rounded-full border border-slate-700 shadow-xl text-yellow-500 font-bold whitespace-nowrap" style={{ transform: `scale(${1/zoom})` }}>CENTER = AVERAGE</div>
+      </div>
+    </div>
+  );
+};
+
+/**
+ * MAIN APP
+ */
+export default function MarketRotationApp() {
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  
+  const [assets, setAssets] = useState([
+    // Real Crypto
+    { symbol: 'BTC', color: '#F7931A', type: 'crypto', name: 'Bitcoin' },
+    { symbol: 'ETH', color: '#627EEA', type: 'crypto', name: 'Ethereum' },
+    { symbol: 'BNB', color: '#F3BA2F', type: 'crypto', name: 'Binance Coin' },
+    { symbol: 'GOLD', color: '#FFD700', type: 'crypto', pair: 'PAXGUSDT', name: 'Gold (PAXG)' },
+    
+    // Real Stocks (Using Yahoo Proxy)
+    { symbol: 'SPY', color: '#10B981', type: 'stock', name: 'S&P 500' },
+    { symbol: 'NVDA', color: '#76B900', type: 'stock', name: 'Nvidia' },
+    { symbol: 'TSLA', color: '#E31937', type: 'stock', name: 'Tesla' },
+    { symbol: 'AAPL', color: '#A2AAAD', type: 'stock', name: 'Apple' },
+  ]);
+
+  const [benchmarkSymbol, setBenchmarkSymbol] = useState('AVG'); 
+  const [calculationLength, setCalculationLength] = useState(14);
+  const [trailLength, setTrailLength] = useState(10); 
+  
+  const rawHistoryRef = useRef({}); 
+  
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [playbackIndex, setPlaybackIndex] = useState(0); 
+  const [maxHistoryLength, setMaxHistoryLength] = useState(0);
+
+  const [chartData, setChartData] = useState([]);
+  const [rotationTrails, setRotationTrails] = useState({});
+
+  const [newSymbol, setNewSymbol] = useState('');
+  const [newType, setNewType] = useState('crypto');
+
+  const [showStats, setShowStats] = useState(false);
+  const [showHelp, setShowHelp] = useState(false);
+  const [selectedStatSymbol, setSelectedStatSymbol] = useState(null);
+  const [computedStats, setComputedStats] = useState(null);
+
+  // Real Yahoo Finance Data via CORS Proxy (Robust Version)
+  const fetchYahooData = async (symbol) => {
+    // List of free proxies to try in order
+    const proxies = [
+        (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+        (url) => `https://corsproxy.io/?${encodeURIComponent(url)}` 
+    ];
+
+    for (const proxy of proxies) {
+        try {
+            const yahooUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&range=5y`;
+            const proxyUrl = proxy(yahooUrl);
+            
+            const response = await fetch(proxyUrl);
+            if (!response.ok) continue; // Try next proxy if failed
+            
+            const data = await response.json();
+            
+            // Validate data structure
+            if (!data.chart || !data.chart.result || !data.chart.result[0]) continue;
+
+            const result = data.chart.result[0];
+            const quotes = result.indicators.quote[0].close;
+            
+            // Filter out null values
+            const cleanData = quotes.filter(p => p !== null && p !== undefined);
+            
+            if (cleanData.length < 50) continue; // Data too short
+
+            return cleanData.slice(-1000); // Success
+        } catch (err) {
+            console.warn(`Proxy failed for ${symbol}:`, err);
+        }
+    }
+    
+    // If all proxies fail
+    console.error(`Failed to fetch data for ${symbol} from all proxies.`);
+    return null;
+  };
+
+  const fetchBinanceData = async (symbol, pairOverride) => {
+    try {
+      const pair = pairOverride || `${symbol.toUpperCase()}USDT`;
+      const response = await fetch(`https://api.binance.com/api/v3/klines?symbol=${pair}&interval=1d&limit=1000`);
+      if (!response.ok) throw new Error(`Symbol ${symbol} not found`);
+      const data = await response.json();
+      return data.map(d => parseFloat(d[4]));
+    } catch (err) {
+      console.error(err);
+      return null;
+    }
+  };
+
+  const loadMarketData = async () => {
+    setLoading(true);
+    setError(null);
+    setIsPlaying(false);
+
+    try {
+      const historyStore = {};
+      const loadedSymbols = [];
+
+      for (const asset of assets) {
+        if (asset.type === 'crypto') {
+           const data = await fetchBinanceData(asset.symbol, asset.pair);
+           if (data) {
+             historyStore[asset.symbol] = data;
+             loadedSymbols.push(asset.symbol);
+           }
+        } else if (asset.type === 'stock') {
+           // FETCH REAL YAHOO DATA
+           const data = await fetchYahooData(asset.symbol);
+           if (data && data.length > 50) { 
+             historyStore[asset.symbol] = data;
+             loadedSymbols.push(asset.symbol);
+           } else {
+             console.warn(`Failed to fetch real data for ${asset.symbol}`);
+           }
+        }
+      }
+
+      let minLen = 99999;
+      loadedSymbols.forEach(s => {
+          if (historyStore[s].length < minLen) minLen = historyStore[s].length;
+      });
+
+      if (loadedSymbols.length === 0) {
+          throw new Error("No data could be loaded. Check connection.");
+      }
+
+      let benchData = [];
+      if (benchmarkSymbol === 'AVG') {
+          for (let i = 0; i < minLen; i++) {
+             let sumNorm = 0;
+             let count = 0;
+             loadedSymbols.forEach(sym => {
+                 const arr = historyStore[sym];
+                 // Align from END (Right alignment for time series with different start dates)
+                 const valIndex = arr.length - minLen + i; 
+                 const startValIndex = arr.length - minLen;
+                 const val = arr[valIndex];
+                 const startVal = arr[startValIndex];
+                 if (startVal && val) {
+                     sumNorm += (val / startVal); 
+                     count++;
+                 }
+             });
+             benchData.push(count > 0 ? (sumNorm / count) * 100 : 100);
+          }
+      } else {
+          if (benchmarkSymbol === 'BTC') {
+              benchData = await fetchBinanceData('BTC');
+          } else if (benchmarkSymbol === 'USDT') {
+              benchData = new Array(minLen).fill(1); // Flat line
+          } else {
+              benchData = await fetchBinanceData('BTC'); // Default fallback
+          }
+      }
+      
+      historyStore['BENCH'] = benchData;
+      rawHistoryRef.current = historyStore;
+      
+      const len = historyStore['BENCH'].length;
+      setMaxHistoryLength(len);
+      setPlaybackIndex(len - 1); 
+
+      processFrame(len - 1); 
+
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const processFrame = (currentIndex) => {
+    const history = rawHistoryRef.current;
+    if (!history['BENCH']) return;
+
+    const currentFrameData = [];
+    const trails = {};
+
+    assets.forEach(asset => {
+        const assetData = history[asset.symbol];
+        const benchData = history['BENCH'];
+
+        if (assetData) {
+            const benchLen = benchData.length;
+            const assetLen = assetData.length;
+            const offset = assetLen - benchLen;
+            const alignedAssetIndex = currentIndex + offset;
+
+            if (alignedAssetIndex >= 0) {
+                const alignedAssetData = assetData.slice(offset); 
+                
+                const pt = calculateRotationPoint(alignedAssetData, benchData, currentIndex, calculationLength);
+
+                if (pt) {
+                    currentFrameData.push({
+                        symbol: asset.symbol,
+                        color: asset.color,
+                        type: asset.type,
+                        ...pt,
+                        price: assetData[alignedAssetIndex] 
+                    });
+
+                    // Trail using dynamic trailLength
+                    const trailPoints = [];
+                    for (let i = 0; i < trailLength; i++) {
+                       const pastIdx = currentIndex - i;
+                       if (pastIdx >= 0) {
+                          const p = calculateRotationPoint(alignedAssetData, benchData, pastIdx, calculationLength);
+                          if (p) trailPoints.unshift(p);
+                       }
+                    }
+                    trails[asset.symbol] = trailPoints;
+                }
+            }
+        }
+    });
+
+    setChartData(currentFrameData);
+    setRotationTrails(trails);
+  };
+
+  useEffect(() => {
+    loadMarketData();
+  }, [assets.length, benchmarkSymbol]);
+
+  useEffect(() => {
+    // Re-process current frame when settings change
+    if (rawHistoryRef.current['BENCH']) {
+        processFrame(playbackIndex);
+    }
+  }, [calculationLength, trailLength]);
+
+  useEffect(() => {
+    let interval;
+    if (isPlaying) {
+      interval = setInterval(() => {
+         setPlaybackIndex(prev => {
+            const next = prev + 1;
+            if (next >= maxHistoryLength) {
+                setIsPlaying(false);
+                return prev;
+            }
+            processFrame(next);
+            return next;
+         });
+      }, 100);
+    }
+    return () => clearInterval(interval);
+  }, [isPlaying, maxHistoryLength]);
+
+  const handleSliderChange = (e) => {
+    const val = Number(e.target.value);
+    setPlaybackIndex(val);
+    processFrame(val);
+  };
+
+  const handleAddAsset = async () => {
+    if (!newSymbol) return;
+    const sym = newSymbol.toUpperCase();
+    if (assets.find(a => a.symbol === sym)) return;
+
+    const colors = ['#EF4444', '#F97316', '#F59E0B', '#84CC16', '#10B981', '#06B6D4', '#3B82F6', '#6366F1', '#EC4899'];
+    const col = colors[assets.length % colors.length];
+    
+    setLoading(true);
+    let valid = false;
+
+    if (newType === 'crypto') {
+        const data = await fetchBinanceData(sym);
+        if (data) valid = true;
+    } else {
+        const data = await fetchYahooData(sym);
+        if (data && data.length > 50) valid = true;
+    }
+    setLoading(false);
+
+    if (valid) {
+        setAssets([...assets, { symbol: sym, color: col, type: newType, name: sym }]);
+        setNewSymbol('');
+    } else {
+        alert(`Cannot find ${sym} or data is unavailable.`);
+    }
+  };
+
+  const removeAsset = (sym) => {
+    setAssets(assets.filter(a => a.symbol !== sym));
+  };
+
+  const openStats = (symbol) => {
+     const history = rawHistoryRef.current[symbol];
+     const bench = rawHistoryRef.current['BENCH'];
+     
+     if (history && bench) {
+         const offset = history.length - bench.length;
+         const alignedHistory = history.slice(offset);
+         const stats = analyzeAssetStatistics(symbol, alignedHistory, bench, calculationLength);
+         setComputedStats(stats);
+         setSelectedStatSymbol(symbol);
+         setShowStats(true);
+     }
+  };
+
+  const getDateLabel = () => {
+    if (maxHistoryLength === 0) return '-';
+    const daysAgo = maxHistoryLength - 1 - playbackIndex;
+    const date = new Date();
+    date.setDate(date.getDate() - daysAgo);
+    return date.toLocaleDateString('th-TH', { day: 'numeric', month: 'short', year: 'numeric' });
+  };
+
+  // Helper to categorize assets
+  const getAssetsInQuadrant = (type) => {
+    return chartData.filter(item => {
+        const { ratio, momentum } = item;
+        if (type === 'Leading') return ratio >= 100 && momentum >= 100;
+        if (type === 'Weakening') return ratio >= 100 && momentum < 100;
+        if (type === 'Lagging') return ratio < 100 && momentum < 100;
+        if (type === 'Improving') return ratio < 100 && momentum >= 100;
+        return false;
+    });
+  };
+
+  return (
+    <div className="flex flex-col h-screen bg-slate-950 text-slate-100 font-sans overflow-hidden">
+      <StatsModal 
+        isOpen={showStats} 
+        onClose={() => setShowStats(false)} 
+        stats={computedStats} 
+        symbol={selectedStatSymbol} 
+        benchmark={benchmarkSymbol === 'AVG' ? 'Global Average' : benchmarkSymbol}
+      />
+
+      <HelpModal 
+        isOpen={showHelp}
+        onClose={() => setShowHelp(false)}
+      />
+
+      <header className="h-16 border-b border-slate-800 bg-slate-900/50 flex items-center justify-between px-6 shrink-0 backdrop-blur-md z-20 gap-4">
+        <div className="flex items-center gap-3 min-w-fit">
+          <div className="bg-blue-600 p-2 rounded-lg shadow-lg shadow-blue-500/20">
+            <Globe className="w-5 h-5 text-white" />
+          </div>
+          <div>
+            <h1 className="font-bold text-lg tracking-tight flex items-center gap-2 whitespace-nowrap">
+                Asset Rotation <span className="text-blue-500">Map</span>
+                <span className="text-[10px] px-2 py-0.5 rounded-full bg-slate-800 text-slate-300 border border-slate-700">Real Data (Binance/Yahoo)</span>
+            </h1>
+            <p className="text-xs text-slate-400">Benchmark: <span className="text-yellow-400 font-bold">{benchmarkSymbol === 'AVG' ? 'Portfolio Average' : benchmarkSymbol}</span></p>
+          </div>
+        </div>
+
+        {/* SETTINGS BAR */}
+        <div className="flex items-center gap-4 bg-slate-800/50 px-4 py-1.5 rounded-full border border-slate-700/50">
+            <div className="flex items-center gap-2">
+                <span className="text-[10px] uppercase text-slate-400 font-bold tracking-wider">Lookback</span>
+                <input 
+                    type="number" 
+                    min="2" max="100"
+                    value={calculationLength}
+                    onChange={(e) => setCalculationLength(Number(e.target.value))}
+                    className="w-12 bg-slate-900 border border-slate-700 rounded text-center text-xs py-1 focus:outline-none focus:border-blue-500"
+                />
+            </div>
+            <div className="w-[1px] h-4 bg-slate-700"></div>
+            <div className="flex items-center gap-2">
+                <span className="text-[10px] uppercase text-slate-400 font-bold tracking-wider">Trail Size</span>
+                <input 
+                    type="number" 
+                    min="0" max="50"
+                    value={trailLength}
+                    onChange={(e) => setTrailLength(Number(e.target.value))}
+                    className="w-12 bg-slate-900 border border-slate-700 rounded text-center text-xs py-1 focus:outline-none focus:border-blue-500"
+                />
+            </div>
+        </div>
+
+        <div className="flex items-center gap-4 flex-1 justify-end">
+            <div className="flex flex-col items-end w-48 lg:w-64">
+                <div className="flex justify-between w-full text-xs text-slate-400 mb-1">
+                    <span className="font-mono text-yellow-500">{getDateLabel()}</span>
+                    <span>{playbackIndex} / {maxHistoryLength}</span>
+                </div>
+                <input 
+                    type="range" 
+                    min="0" 
+                    max={maxHistoryLength - 1} 
+                    value={playbackIndex}
+                    onChange={handleSliderChange}
+                    className="w-full h-1 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-blue-500"
+                />
+            </div>
+
+            <button onClick={() => setIsPlaying(!isPlaying)} className={`w-10 h-10 flex items-center justify-center rounded-full transition-all shrink-0 ${isPlaying ? 'bg-red-500 hover:bg-red-600' : 'bg-green-500 hover:bg-green-600 text-white'}`}>
+                {isPlaying ? <Pause size={18} fill="currentColor" /> : <Play size={18} fill="currentColor" className="ml-0.5" />}
+            </button>
+            
+            <button onClick={loadMarketData} className="p-2 text-slate-400 hover:text-white bg-slate-800 rounded-lg border border-slate-700 hover:border-slate-500 shrink-0" title="Refresh Data">
+                <RefreshCw size={18} className={loading ? 'animate-spin' : ''}/>
+            </button>
+
+             <button onClick={() => setShowHelp(true)} className="p-2 text-blue-400 hover:text-white bg-blue-500/10 hover:bg-blue-600 rounded-lg border border-blue-500/20 hover:border-blue-400 transition-colors shrink-0" title="How it Works">
+                <HelpCircle size={18} />
+            </button>
+        </div>
+      </header>
+
+      <div className="flex flex-1 overflow-hidden">
+        <aside className="w-72 bg-slate-900 border-r border-slate-800 flex flex-col z-10">
+            <div className="p-4 border-b border-slate-800">
+                <div className="flex items-center justify-between mb-3">
+                    <h2 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Benchmark</h2>
+                    <select value={benchmarkSymbol} onChange={(e) => setBenchmarkSymbol(e.target.value)} className="bg-slate-800 text-xs border border-slate-700 rounded px-2 py-1 focus:outline-none text-white">
+                        <option value="AVG">Average (All Assets)</option>
+                        <option value="BTC">Bitcoin (BTC)</option>
+                        <option value="USDT">USD (Stable)</option>
+                    </select>
+                </div>
+                <div className="flex gap-2">
+                    <input type="text" placeholder="Symbol" value={newSymbol} onChange={(e) => setNewSymbol(e.target.value)} className="w-20 bg-slate-800 border border-slate-700 rounded px-2 py-1.5 text-sm focus:outline-none focus:border-blue-500 text-white placeholder-slate-600 uppercase" />
+                    <select value={newType} onChange={(e) => setNewType(e.target.value)} className="flex-1 bg-slate-800 border border-slate-700 rounded px-1 text-xs text-white">
+                        <option value="crypto">Crypto</option>
+                        <option value="stock">Stock</option>
+                    </select>
+                    <button onClick={handleAddAsset} className="bg-blue-600 hover:bg-blue-500 text-white px-2 py-1.5 rounded transition-colors" disabled={loading}><Plus size={16} /></button>
+                </div>
+            </div>
+
+            <div className="flex-1 overflow-y-auto custom-scrollbar p-2 space-y-1">
+                {assets.map((asset) => {
+                    const stats = chartData.find(c => c.symbol === asset.symbol);
+                    const ratio = stats ? stats.ratio.toFixed(1) : '-';
+                    const mom = stats ? stats.momentum.toFixed(1) : '-';
+                    const price = stats ? stats.price.toFixed(2) : '-';
+                    const inStore = rawHistoryRef.current[asset.symbol];
+
+                    return (
+                        <div key={asset.symbol} className="group flex items-center justify-between p-3 rounded-lg bg-slate-800/40 hover:bg-slate-800 border border-transparent hover:border-slate-700 transition-all">
+                            <div className="flex items-center gap-3">
+                                <div className="w-1.5 h-8 rounded-full shadow-[0_0_10px_rgba(0,0,0,0.5)]" style={{ backgroundColor: asset.color, boxShadow: `0 0 8px ${asset.color}40` }}></div>
+                                <div>
+                                    <div className="font-bold text-sm text-slate-200 flex items-center gap-1">
+                                        {asset.symbol}
+                                    </div>
+                                    <div className="text-[10px] text-slate-500">{asset.name || asset.symbol}</div>
+                                </div>
+                            </div>
+                            <div className="flex items-center gap-2">
+                                <div className="text-right mr-2">
+                                    <div className={`text-[10px] font-mono ${Number(ratio) > 100 ? 'text-green-400' : 'text-red-400'}`}>R: {ratio}</div>
+                                    <div className={`text-[10px] font-mono ${Number(mom) > 100 ? 'text-blue-400' : 'text-slate-400'}`}>M: {mom}</div>
+                                </div>
+                                {inStore && (
+                                    <button onClick={() => openStats(asset.symbol)} className="p-1.5 text-slate-500 hover:text-yellow-400 hover:bg-slate-700 rounded transition-colors" title="View Deep Statistics">
+                                        <BarChart2 size={16} />
+                                    </button>
+                                )}
+                                <button onClick={() => removeAsset(asset.symbol)} className="p-1.5 text-slate-500 hover:text-red-400 hover:bg-slate-700 rounded transition-colors opacity-0 group-hover:opacity-100">
+                                    <Trash2 size={16} />
+                                </button>
+                            </div>
+                        </div>
+                    );
+                })}
+            </div>
+            
+            <div className="p-3 border-t border-slate-800 bg-slate-900 text-[10px] text-slate-500 flex justify-between items-center">
+                 <span className="flex items-center gap-1"><Activity size={10}/> Binance API & Yahoo Proxy</span>
+            </div>
+        </aside>
+
+        <main className="flex-1 relative bg-slate-950 flex flex-col p-4">
+            {loading && (
+                <div className="absolute inset-0 z-50 flex flex-col items-center justify-center bg-slate-950/80 backdrop-blur-sm">
+                    <RefreshCw className="animate-spin text-blue-500 mb-2" size={32} />
+                    <span className="text-sm text-blue-400 animate-pulse">กำลังโหลดข้อมูลจริง...</span>
+                </div>
+            )}
+
+            <RotationChart data={chartData} historyTrail={rotationTrails} />
+
+            <div className="mt-4 grid grid-cols-4 gap-4 h-32">
+                 <div className="bg-slate-900/50 p-3 rounded-xl border border-slate-800/50 hover:border-green-500/30 transition-colors flex flex-col">
+                    <div className="flex items-center gap-2 mb-2 pb-2 border-b border-slate-800">
+                        <div className="w-2 h-2 rounded-full bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.5)]"></div>
+                        <div>
+                            <div className="text-[10px] font-bold text-slate-300 uppercase tracking-wider">Leading (ผู้นำ)</div>
+                            <div className="text-[9px] text-green-400">โมเมนตัมและเทรนด์แข็งแกร่ง</div>
+                        </div>
+                    </div>
+                    <div className="flex-1 overflow-y-auto text-[10px] space-y-1 custom-scrollbar">
+                        {getAssetsInQuadrant('Leading').map(a => (
+                            <div key={a.symbol} className="flex justify-between text-slate-400">
+                                <span>{a.symbol}</span>
+                            </div>
+                        ))}
+                    </div>
+                 </div>
+
+                 <div className="bg-slate-900/50 p-3 rounded-xl border border-slate-800/50 hover:border-yellow-500/30 transition-colors flex flex-col">
+                    <div className="flex items-center gap-2 mb-2 pb-2 border-b border-slate-800">
+                        <div className="w-2 h-2 rounded-full bg-yellow-500 shadow-[0_0_8px_rgba(234,179,8,0.5)]"></div>
+                        <div>
+                            <div className="text-[10px] font-bold text-slate-300 uppercase tracking-wider">Weakening (พักตัว)</div>
+                            <div className="text-[9px] text-yellow-400">เทรนด์ยังดี แต่แรงเริ่มตก</div>
+                        </div>
+                    </div>
+                    <div className="flex-1 overflow-y-auto text-[10px] space-y-1 custom-scrollbar">
+                        {getAssetsInQuadrant('Weakening').map(a => (
+                             <div key={a.symbol} className="flex justify-between text-slate-400">
+                                <span>{a.symbol}</span>
+                            </div>
+                        ))}
+                    </div>
+                 </div>
+
+                 <div className="bg-slate-900/50 p-3 rounded-xl border border-slate-800/50 hover:border-slate-500/30 transition-colors flex flex-col">
+                    <div className="flex items-center gap-2 mb-2 pb-2 border-b border-slate-800">
+                        <div className="w-2 h-2 rounded-full bg-slate-500 shadow-[0_0_8px_rgba(100,116,139,0.5)]"></div>
+                        <div>
+                            <div className="text-[10px] font-bold text-slate-300 uppercase tracking-wider">Lagging (ล้าหลัง)</div>
+                            <div className="text-[9px] text-slate-400">โมเมนตัมและเทรนด์อ่อนแอ</div>
+                        </div>
+                    </div>
+                    <div className="flex-1 overflow-y-auto text-[10px] space-y-1 custom-scrollbar">
+                        {getAssetsInQuadrant('Lagging').map(a => (
+                             <div key={a.symbol} className="flex justify-between text-slate-400">
+                                <span>{a.symbol}</span>
+                            </div>
+                        ))}
+                    </div>
+                 </div>
+
+                 <div className="bg-slate-900/50 p-3 rounded-xl border border-slate-800/50 hover:border-red-500/30 transition-colors flex flex-col">
+                    <div className="flex items-center gap-2 mb-2 pb-2 border-b border-slate-800">
+                        <div className="w-2 h-2 rounded-full bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.5)]"></div>
+                        <div>
+                            <div className="text-[10px] font-bold text-slate-300 uppercase tracking-wider">Improving (ฟื้นตัว)</div>
+                            <div className="text-[9px] text-red-400">เริ่มมีโมเมนตัมกลับมา</div>
+                        </div>
+                    </div>
+                    <div className="flex-1 overflow-y-auto text-[10px] space-y-1 custom-scrollbar">
+                         {getAssetsInQuadrant('Improving').map(a => (
+                             <div key={a.symbol} className="flex justify-between text-slate-400">
+                                <span>{a.symbol}</span>
+                            </div>
+                        ))}
+                    </div>
+                 </div>
+            </div>
+        </main>
+      </div>
+    </div>
+  );
+}
